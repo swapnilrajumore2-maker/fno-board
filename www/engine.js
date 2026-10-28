@@ -7,7 +7,7 @@ const IST = 19800, W = [1/3, 1/3, 1/3];                      // R Factor weights
 const REFRESH = +(localStorage.getItem("refresh") || 30);    // seconds; Yahoo free data cannot sustain 5s for ~110 stocks
 const HDR = { "User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36" };
 const S = { seq: 0, ts: 0, data_ts: 0, updated: null, stocks: [], sectors: [], error: null, source: "yahoo" };
-let daily = {}, dailyAt = 0, fails = 0;
+let daily = {}, dailyAt = 0, fails = 0, timer = null, running = null, want1m = false, chain = false, m1 = null, ERR = [];
 const mean = a => a.reduce((s, x) => s + x, 0) / a.length;
 const dayKey = t => Math.floor((t + IST) / 86400);
 function marketOpen() { const d = new Date(Date.now() + IST * 1000), m = d.getUTCHours() * 60 + d.getUTCMinutes();
@@ -17,11 +17,12 @@ async function chart(sym, range, interval) {
   const r = await fetch(u, { headers: HDR }); if (!r.ok) throw new Error("HTTP " + r.status);
   const c = (await r.json()).chart.result[0], q = c.indicators.quote[0], rows = [];
   (c.timestamp || []).forEach((t, i) => { if (q.close[i] != null) rows.push({ t, o: q.open[i], h: q.high[i], l: q.low[i], c: q.close[i], v: q.volume[i] || 0 }); });
+  rows.meta = c.meta || {};
   return rows;
 }
 async function pool(items, n, fn) {                           // limited concurrency so Yahoo is not flooded
   const out = []; let i = 0;
-  await Promise.all(Array.from({ length: n }, async () => { while (i < items.length) { const k = i++; try { out[k] = await fn(items[k]); } catch (e) { out[k] = null; } } }));
+  await Promise.all(Array.from({ length: n }, async () => { while (i < items.length) { const k = i++; try { out[k] = await fn(items[k]); } catch (e) { out[k] = null; ERR.push(e); } } }));
   return out;
 }
 function row(s, ltp, prev, o, hi, lo, vol, turn, vr, sp, ph, pl, r) {
@@ -55,7 +56,46 @@ function build(rows) {
     if (r.r >= 1.5 && r.chg < -0.5 && sc[r.sector] < 0) r.signal = "Short watch"; });
   return [sectors, rows];
 }
-async function tick() {
+// ---------- strategies (scan only the F&O list above; only stocks that fully meet every condition are returned) ----------
+const CFG = {
+  m1: { mins: 1, start: 555, end: 570, n: 5, maxPct: 0.35 },   // 1-minute candles, 09:15-09:30 IST; range = last 5 candles, <= 0.35% wide
+  m5: { mins: 5, start: 555, end: 600, n: 4, maxPct: 0.60 },   // 5-minute candles, 09:15-10:00 IST; range = last 4 candles, <= 0.60% wide
+  smallBody: 0.5,    // pullback candle body must be <= 50% of the prior trend candle's body
+  rangeVolX: 1.5     // range-breakout candle volume must be >= 1.5x the average volume of the range candles
+};
+const minOf = t => ((t + IST) % 86400) / 60;                  // minute of day in IST
+function scan(sym, bars, key) {
+  const c = CFG[key], w = bars.filter(b => { const m = minOf(b.t); return m >= c.start && m < c.end; });
+  if (w.length < 3) return [];
+  const body = b => Math.abs(b.c - b.o), last = bars[bars.length - 1], nowS = Date.now() / 1000;
+  const mk = (side, setup, C, entry, h, l, va, vb) => ({ sym, sector: SECTOR_OF[sym], tf: key, setup, side, entry, ltp: last.c, h, l, va, vb, vc: C.v, t: C.t,
+    live: marketOpen() && C === last && nowS < C.t + c.mins * 60 });
+  let pb = null, rb = null;
+  for (let k = 2; k < w.length; k++) {                        // Pullback: A trend candle -> B small counter candle inside A with lower volume -> C breaks B with higher volume
+    const A = w[k - 2], B = w[k - 1], C = w[k], small = body(B) <= CFG.smallBody * body(A), inside = B.c >= A.l && B.c <= A.h;
+    if (A.c > A.o && B.c < B.o && small && inside && B.h <= A.h && B.v < A.v && C.h > B.h && C.v > B.v) pb = mk("BUY", "Pullback", C, B.h, B.h, B.l, A.v, B.v);
+    if (A.c < A.o && B.c > B.o && small && inside && B.l >= A.l && B.v < A.v && C.l < B.l && C.v > B.v) pb = mk("SELL", "Pullback", C, B.l, B.h, B.l, A.v, B.v);
+  }
+  for (let k = c.n; k < w.length; k++) {                      // Range breakout: tight range of n candles, then a candle closing outside it on strong volume
+    const R = w.slice(k - c.n, k), hi = Math.max(...R.map(b => b.h)), lo = Math.min(...R.map(b => b.l)), C = w[k], av = mean(R.map(b => b.v));
+    if ((hi - lo) / lo * 100 > c.maxPct || C.v < CFG.rangeVolX * av) continue;
+    if (C.c > hi) rb = mk("BUY", "Range breakout", C, hi, hi, lo, av, null);
+    else if (C.c < lo) rb = mk("SELL", "Range breakout", C, lo, hi, lo, av, null);
+  }
+  return [pb, rb].filter(Boolean);
+}
+const median = a => { const s = [...a].sort((x, y) => x - y); return s.length ? s[Math.floor(s.length / 2)] : null; };
+function friendly(e) {
+  const m = String((e && e.message) || e);
+  if (/HTTP 429/.test(m)) return "Yahoo is limiting requests (HTTP 429). Wait a minute, then tap refresh.";
+  if (/HTTP (401|403)/.test(m)) return "Yahoo refused the request (" + m + "). Try again later.";
+  if (/HTTP 5\d\d/.test(m)) return "Yahoo server error (" + m + "). Try again shortly.";
+  if (/Failed to fetch|NetworkError|Network request failed|Load failed|timed? ?out/i.test(m)) return "No internet connection, or Yahoo cannot be reached.";
+  return m.slice(0, 140);
+}
+const needs1m = () => !m1 || m1.day !== S.sday || !m1.complete;
+async function run() {
+  S.loading = true; ERR = [];
   try {
     if (Date.now() - dailyAt > 1800e3) {                      // 20-day baseline, refreshed every 30 min
       const res = await pool(SYMS, 8, s => chart(s, "3mo", "1d"));
@@ -64,16 +104,38 @@ async function tick() {
     }
     const intra = await pool(SYMS, 8, s => chart(s, "1d", "5m")), rows = []; let lastTs = 0;
     SYMS.forEach((s, k) => { try { const m = metrics(s, daily[s], intra[k]); if (m) { rows.push(m); lastTs = Math.max(lastTs, intra[k][intra[k].length - 1].t); } } catch (e) {} });
-    if (!rows.length) throw new Error("No data returned - check internet; Yahoo may be limiting requests");
+    if (!rows.length) throw ERR[0] || new Error("No data returned - check internet; Yahoo may be limiting requests");
+    const failed = intra.filter(x => !x).length, sday = dayKey(lastTs);
+    if (want1m && (!m1 || m1.day !== sday || !m1.complete)) {   // 1-minute candles: fetched only after the 1 Minute panel was opened, and only until the 09:15-09:30 window is complete
+      const r1 = await pool(SYMS, 8, s => chart(s, "1d", "1m")), bars = {}; let last1 = 0;
+      SYMS.forEach((s, k) => { if (r1[k] && r1[k].length) { bars[s] = r1[k]; last1 = Math.max(last1, r1[k][r1[k].length - 1].t); } });
+      if (last1) m1 = { day: dayKey(last1), bars, complete: dayKey(last1) === sday && minOf(last1) >= 569 };
+    }
+    const strat = { m1: [], m5: [] }, sinfo = {}, nowMin = minOf(Date.now() / 1000), session = new Date((lastTs + IST) * 1000).toUTCString().slice(5, 16);
+    for (const key of ["m5", "m1"]) {
+      const by = key === "m5" ? Object.fromEntries(SYMS.map((s, k) => [s, intra[k]])) : (m1 && m1.day === sday ? m1.bars : null); let scanned = 0;
+      if (by) for (const s of SYMS) { const b = by[s]; if (b && b.length) { scanned++; strat[key].push(...scan(s, b, key)); } }
+      strat[key].sort((a, b) => b.t - a.t);
+      sinfo[key] = { ready: !!by, scanned, universe: SYMS.length, session, active: marketOpen() && nowMin >= CFG[key].start && nowMin < CFG[key].end };
+    }
+    const ages = intra.filter(b => b && b.length).map(b => Date.now() / 1000 - b[b.length - 1].t), md = intra.find(b => b && b.meta && b.meta.exchangeDataDelayedBy != null);
     const [sectors, stocks] = build(rows), d = new Date(Date.now() + IST * 1000);
-    Object.assign(S, { stocks, sectors, error: null, seq: S.seq + 1, ts: Date.now() / 1000, data_ts: lastTs,
+    Object.assign(S, { stocks, sectors, strat, sinfo, sday, error: null, seq: S.seq + 1, ts: Date.now() / 1000, data_ts: lastTs,
+      warn: failed ? failed + " of " + SYMS.length + " stocks could not be loaded" + (ERR[0] ? " (" + friendly(ERR[0]) + ")" : "") : null,
+      feed: { provider: "Yahoo Finance (unofficial chart API)", mode: "polled every " + REFRESH + "s, no WebSocket", age_min: ages.length ? median(ages) / 60 : null,
+              meta_delay: md ? md.meta.exchangeDataDelayedBy : null },
       updated: d.toUTCString().slice(5, 11) + " " + d.toUTCString().slice(17, 25) });
     fails = 0;
-  } catch (e) { fails++; S.error = String(e.message || e).slice(0, 160); }
+  } catch (e) { fails++; S.error = friendly(e); }
+  S.loading = false; running = null;
   let wait = marketOpen() ? REFRESH : 600; if (fails) wait = Math.min(120, REFRESH * 2 ** fails);
-  setTimeout(tick, wait * 1000);
+  clearTimeout(timer); timer = setTimeout(refresh, wait * 1000);
+  if (chain) { chain = false; if (!fails && needs1m()) return refresh(); }
 }
+function refresh() { if (!running) { clearTimeout(timer); running = run(); } return running; }   // one request cycle at a time: duplicate calls share the running one
 (typeof window !== "undefined" ? window : globalThis).Engine = {
-  get: async () => ({ ...S, now: Date.now() / 1000, refresh: REFRESH, poll: 5, market: marketOpen() ? "OPEN" : "CLOSED" }) };
-tick();
+  get: async () => ({ ...S, now: Date.now() / 1000, refresh: REFRESH, poll: 5, loading: !!running, market: marketOpen() ? "OPEN" : "CLOSED" }),
+  refresh: () => refresh(),
+  want1m: () => { want1m = true; if (!needs1m()) return running || Promise.resolve(); chain = true; return refresh(); } };
+refresh();
 })();

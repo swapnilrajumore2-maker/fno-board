@@ -40,10 +40,15 @@ tr.hotrow{background:rgba(242,184,75,.10)}.hotn,.star{color:var(--amber);font-we
 .tag.l{background:#1f4a3a;color:#7be0b3}.tag.s{background:#552a2a;color:#ff9b94}.tag.u{background:#4a3a14;color:var(--amber)}
 @media(max-width:700px){header,nav,main{padding-left:12px;padding-right:12px}h1{font-size:17px}th,td{padding:6px 7px;font-size:12.5px}
 #tabs{display:flex;gap:6px;overflow-x:auto;max-width:100%}#tabs button{white-space:nowrap}.row{grid-template-columns:100px 1fr 62px}}
+.icon{margin-left:auto;display:inline-flex;align-items:center;gap:6px}.icon svg{display:block}button:disabled{opacity:.6;cursor:wait}
+.spin svg{animation:sp .9s linear infinite}@keyframes sp{to{transform:rotate(360deg)}}
+.meta{flex-basis:100%;display:flex;flex-wrap:wrap;gap:2px 16px}
+@media(max-width:700px){#rft{display:none}}
 </style></head><body>
 <header><h1>Sector &amp; F&amp;O Board</h1><span id="mkt" class="pill">…</span>
-<span class="mute">Last update <span id="upd" class="num">–</span></span><span id="err" class="dn"></span></header>
-<nav><span id="tabs"><button data-t="sectors" class="on">Sector panels</button> <button data-t="monitor">Live monitor</button> <button data-t="pulse">Market Pulse</button> <button data-t="gaps">Gap scanner</button></span>
+<button id="rf" class="icon" title="Refresh now" aria-label="Refresh now"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg><span id="rft">Refresh</span></button>
+<div class="meta"><span class="mute">Last update <span id="upd" class="num">–</span> IST</span><span class="mute" id="feed"></span><span id="err" class="dn"></span></div></header>
+<nav><span id="tabs"><button data-t="sectors" class="on">Sector panels</button> <button data-t="monitor">Live monitor</button> <button data-t="pulse">Market Pulse</button> <button data-t="gaps">Gap scanner</button> <button data-t="strategy">Strategy</button></span>
 <span class="grow"></span><label class="mute">Sector <select id="sec"><option value="">All sectors</option></select></label><span class="mute">Universe: NSE F&amp;O</span></nav>
 <main>
 <section id="s-sectors"><div class="tools"><label class="mute">Rank by <select id="o-sectors">
@@ -66,6 +71,11 @@ tr.hotrow{background:rgba(242,184,75,.10)}.hotn,.star{color:var(--amber);font-we
  <span class="mute">Regular-session open vs previous completed session's high/low. Gaps ≥ 1% are highlighted.</span></div>
  <div class="two"><div class="panel"><h2 class="up">Gap-up: open above previous day high <span class="mute" id="n-up"></span></h2><div class="scroll" id="t-up"></div></div>
  <div class="panel"><h2 class="dn">Gap-down: open below previous day low <span class="mute" id="n-dn"></span></h2><div class="scroll" id="t-dn"></div></div></div></section>
+<section id="s-strategy" hidden><div class="panel"><div class="tools" style="justify-content:space-between"><h2 style="margin:0">Strategy scanner</h2>
+ <span id="subs"><button data-sub="m1">1 Minute</button> <button data-sub="m5" class="on">5 Minute</button></span></div>
+ <div class="tools"><label class="mute">Setup <select id="o-setup"><option value="">All setups</option><option>Pullback</option><option>Range breakout</option></select></label>
+ <span class="mute" id="sinfo"></span></div><div class="scroll" id="t-strat"></div>
+ <p class="mute">Only stocks that meet every condition are listed. <b>Pullback:</b> a bullish candle, then a small red candle that closes inside its range on lower volume, then a candle breaking above the red candle's high on higher volume (Buy; Sell is the mirror image). <b>Range breakout:</b> a tight range of recent candles, then a candle closing above the range high (Buy) or below the range low (Sell) on at least 1.5× the range's average volume. Entry = the level that must break. Screens only, not advice.</p></div></section>
 </main>
 <script src="engine.js"></script>
 <script>
@@ -103,24 +113,42 @@ function gaps(){const f=SORT[$('o-gaps').value],all=flt(),cols=[['Symbol',sym],[
  ['Gap %',x=>`<span class="${cls(x.gap)}">${pct(x.gap)}</span>`],['Chg',chgc],['Volume',x=>qty(x.volume)],['R Factor',rc],['Direction',dir]],hg=x=>Math.abs(x.gap)>=1?'hotrow':'';
  const up=all.filter(x=>x.gap_type==='up').sort(f),dn=all.filter(x=>x.gap_type==='down').sort(f);
  $('t-up').innerHTML=T(cols,up,1,hg);$('t-dn').innerHTML=T(cols,dn,1,hg);$('n-up').textContent='· '+up.length;$('n-dn').textContent='· '+dn.length}
-const VIEW={sectors,monitor,pulse,gaps};
+let sub='m5';
+const hhmm=t=>new Date((t+19800)*1000).toUTCString().slice(17,25);
+function strategy(){const info=(D.sinfo||{})[sub]||{},f=$('o-setup').value,s=$('sec').value,win=sub==='m1'?'09:15–09:30':'09:15–10:00';
+ const rows=((D.strat||{})[sub]||[]).filter(x=>(!s||x.sector===s)&&(!f||x.setup===f));
+ $('sinfo').innerHTML=`${sub==='m1'?'1-minute':'5-minute'} candles · window ${win} IST · ${info.active?'<b class="up">scanning now</b>':'window closed, showing '+esc(info.session||'last session')} · ${info.scanned||0} of ${info.universe||0} F&amp;O stocks scanned · ${rows.length} signal${rows.length===1?'':'s'}`;
+ if(!info.ready){$('t-strat').innerHTML='<p class="mute" style="padding:8px">Loading 1-minute candles…</p>';return}
+ const dash=v=>v==null?'–':qty(v);
+ $('t-strat').innerHTML=rows.length?T([['Stock',x=>`<b>${esc(x.sym)}</b>${x.live?'<span class="tag u">Live candle</span>':''}`],['Signal',x=>`<span class="tag ${x.side==='BUY'?'l':'s'}">${x.side}</span>`],['Setup',x=>esc(x.setup)],['TF',x=>x.tf==='m1'?'1m':'5m'],
+  ['Entry level',x=>(x.side==='BUY'?'▲ ':'▼ ')+p2(x.entry)],['Current price',x=>p2(x.ltp)],['From entry',x=>`<span class="${cls(x.side==='BUY'?x.ltp-x.entry:x.entry-x.ltp)}">${pct((x.ltp/x.entry-1)*100)}</span>`],
+  ['Pullback / range H–L',x=>p2(x.h)+' – '+p2(x.l)],['Prior / avg vol',x=>dash(x.va)],['Pullback vol',x=>dash(x.vb)],['Breakout vol',x=>dash(x.vc)],['Signal time (IST)',x=>hhmm(x.t)]],rows,3)
+  :'<p class="mute" style="padding:8px">No stock fully meets the conditions in this window right now.</p>'}
+const VIEW={sectors,monitor,pulse,gaps,strategy};
 function draw(){const sc=[...document.querySelectorAll('.scroll')].map(e=>e.scrollTop);VIEW[tab]();document.querySelectorAll('.scroll').forEach((e,i)=>{if(sc[i])e.scrollTop=sc[i]})}
-function status(){const open=D.market==='OPEN',age=D.now-D.ts;let t='CLOSED',c='',n='';
- if(open){if(!D.ts||age>Math.max(15,D.refresh*3)){t='STALE';c='warn'}else{t='LIVE';c='open'}}
+let manual=false;
+function spin(){const on=manual||!!D.loading;$('rf').classList.toggle('spin',on);$('rf').disabled=on;$('rft').textContent=on?'Updating…':'Refresh'}
+function status(){const open=D.market==='OPEN',age=D.now-D.ts,f=D.feed;let t='CLOSED',c='',n='';
+ if(open){if(!D.ts||age>Math.max(15,D.refresh*3)){t='STALE';c='warn'}else if(f&&f.age_min!=null&&f.age_min>7){t='DELAYED';c='warn'}else{t='LIVE';c='open'}}
  $('mkt').textContent=t;$('mkt').className='pill '+c;$('upd').textContent=D.updated||'–';
- if(D.error)n=D.error;else if(!open)n='Market closed – showing last session';else if(D.data_ts&&D.now-D.data_ts>600)n='Provider data delayed ~'+Math.round((D.now-D.data_ts)/60)+' min';
- $('err').textContent=n}
+ if(D.error)n=D.error+(D.updated?' Showing data from '+D.updated+' IST.':'');else if(D.warn)n=D.warn;else if(!open)n='Market closed – showing the last session';
+ $('err').textContent=n;
+ $('feed').textContent=f?f.provider+' · '+f.mode+(open&&f.age_min!=null?(f.age_min>180?' · newest candle is from an earlier session (holiday or no live data)':' · newest candle '+f.age_min.toFixed(1)+' min old'+(f.age_min>7?' (delayed)':'')):'')+(f.meta_delay!=null?' · provider-reported delay '+f.meta_delay+' min':''):'';
+ spin()}
 function fill(){const s=$('sec'),v=s.value;if(s.options.length-1!==D.sectors.length){s.innerHTML='<option value="">All sectors</option>'+D.sectors.map(c=>`<option>${esc(c.name)}</option>`).join('');s.value=v}}
-async function pull(){if(busy)return;busy=true;
- try{D=await Engine.get();status();if(D.seq!==seq){seq=D.seq;fill();draw()}}
- catch(e){$('err').textContent='App error';$('mkt').textContent='OFFLINE';$('mkt').className='pill warn'}
- busy=false;setTimeout(pull,(D.poll||D.refresh||5)*1000)}
+async function load(){try{D=await Engine.get();status();if(D.seq!==seq){seq=D.seq;fill();draw()}}
+ catch(e){$('err').textContent='App error: '+(e.message||e);$('mkt').textContent='OFFLINE';$('mkt').className='pill warn'}}
+function loop(){load().finally(()=>setTimeout(loop,(D.poll||5)*1000))}
+async function manualRefresh(){if(manual)return;manual=true;spin();try{await Engine.refresh()}catch(e){}await load();manual=false;spin()}
+$('rf').onclick=manualRefresh;
+$('subs').onclick=e=>{const s=e.target.dataset.sub;if(!s)return;sub=s;document.querySelectorAll('#subs button').forEach(b=>b.className=b.dataset.sub===s?'on':'');
+ draw();if(s==='m1'){spin();Engine.want1m().then(load)}};
 $('tabs').onclick=e=>{const t=e.target.dataset.t;if(!t)return;tab=t;document.querySelectorAll('#tabs button').forEach(b=>b.className=b.dataset.t===t?'on':'');
- Object.keys(VIEW).forEach(k=>$('s-'+k).hidden=k!==t);draw()};
+ Object.keys(VIEW).forEach(k=>$('s-'+k).hidden=k!==t);draw();if(t==='strategy'&&sub==='m1')Engine.want1m().then(load)};
 document.body.onclick=e=>{const t=e.target.closest('[data-s]');if(t){$('sec').value=$('sec').value===t.dataset.s?'':t.dataset.s;draw()}};
 document.querySelectorAll('select,input').forEach(el=>el.oninput=draw);
 $('p-sectors').addEventListener('toggle',e=>{const n=e.target.dataset.n;if(n)e.target.open?closed.delete(n):closed.add(n)},true);
 $('exp').onclick=()=>{closed.clear();draw()};$('col').onclick=()=>{D.sectors.forEach(c=>closed.add(c.name));draw()};
 $('vh').onclick=()=>{view='h';$('vh').className='on';$('vb').className='';draw()};$('vb').onclick=()=>{view='b';$('vb').className='on';$('vh').className='';draw()};
-pull();
+loop();
 </script></body></html>

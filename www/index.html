@@ -75,7 +75,7 @@ tr.hotrow{background:rgba(242,184,75,.10)}.hotn,.star{color:var(--amber);font-we
  <span id="subs"><button data-sub="m1">1 Minute</button> <button data-sub="m5" class="on">5 Minute</button></span></div>
  <div class="tools"><label class="mute">Setup <select id="o-setup"><option value="">All setups</option><option>Pullback</option><option>Range breakout</option></select></label>
  <span class="mute" id="sinfo"></span></div><div class="scroll" id="t-strat"></div>
- <p class="mute"><b>Shortlist:</b> only stocks with R Factor above 1 in the 3 strongest up sectors (Buy signals only) and the 3 strongest down sectors (Sell signals only) are scanned, and the list follows the live screening, so a stock leaves it when its R Factor or sector falls back. Only stocks that meet every condition are listed. <b>Pullback:</b> a bullish candle, then a small red candle that closes inside its range on lower volume, then a candle breaking above the red candle's high on higher volume (Buy; Sell is the mirror image). <b>Range breakout:</b> a tight range of recent candles, then a candle closing above the range high (Buy) or below the range low (Sell) on at least 1.5× the range's average volume. Entry = the level that must break. Screens only, not advice.</p></div></section>
+ <p class="mute"><b>Filter:</b> a stock appears here only if (1) it is among the top-ranked Long watch or Short watch stocks in the Live monitor, (2) it has a high R Factor (1.5 or more), and (3) a setup is forming in it in the same direction (Long watch needs a Buy signal, Short watch a Sell signal). Only stocks that meet every condition are listed. <b>Pullback:</b> a bullish candle, then a small red candle that closes inside its range on lower volume, then a candle breaking above the red candle's high on higher volume (Buy; Sell is the mirror image). <b>Range breakout:</b> a tight range of recent candles, then a candle closing above the range high (Buy) or below the range low (Sell) on at least 1.5× the range's average volume. Entry = the level that must break. Screens only, not advice.</p></div></section>
 </main>
 <script src="engine.js"></script>
 <script>
@@ -115,17 +115,17 @@ function gaps(){const f=SORT[$('o-gaps').value],all=flt(),cols=[['Symbol',sym],[
  $('t-up').innerHTML=T(cols,up,1,hg);$('t-dn').innerHTML=T(cols,dn,1,hg);$('n-up').textContent='· '+up.length;$('n-dn').textContent='· '+dn.length}
 let sub='m5';
 const hhmm=t=>new Date((t+19800)*1000).toUTCString().slice(17,25);
-function strategy(){const info=(D.sinfo||{})[sub]||{},sl=D.shortlist||{n:0,up:[],down:[],min_r:1},f=$('o-setup').value,s=$('sec').value,win=sub==='m1'?'09:15–09:30':'09:15–10:00';
+function strategy(){const info=(D.sinfo||{})[sub]||{},sl=D.shortlist||{n:0,long:0,short:0,min_r:1.5,top_n:10},f=$('o-setup').value,s=$('sec').value,win=sub==='m1'?'09:15–09:30':'09:15–10:00';
  const rows=((D.strat||{})[sub]||[]).filter(x=>(!s||x.sector===s)&&(!f||x.setup===f));
- const sec=l=>l.length?l.map(x=>`${esc(x.name)} ${pct(x.chg)}`).join(', '):'none';
- $('sinfo').innerHTML=`${sub==='m1'?'1-minute':'5-minute'} candles · window ${win} IST · ${info.active?'<b class="up">scanning now</b>':'window closed, showing '+esc(info.session||'last session')} · ${rows.length} signal${rows.length===1?'':'s'}<br>Shortlist from live screening: <b>${sl.n}</b> stock${sl.n===1?'':'s'} with R Factor above ${sl.min_r} · Buy only from <b class="up">${sec(sl.up)}</b> · Sell only from <b class="dn">${sec(sl.down)}</b>`;
+ $('sinfo').innerHTML=`${sub==='m1'?'1-minute':'5-minute'} candles · window ${win} IST · ${info.active?'<b class="up">scanning now</b>':'window closed, showing '+esc(info.session||'last session')} · ${rows.length} signal${rows.length===1?'':'s'}<br>Live monitor ranking: top <b class="up">${sl.long} Long watch</b> + top <b class="dn">${sl.short} Short watch</b> stocks (max ${sl.top_n} each, by R Factor, R ≥ ${sl.min_r}) are checked for a forming setup`;
  if(!info.ready){$('t-strat').innerHTML='<p class="mute" style="padding:8px">Loading 1-minute candles…</p>';return}
  const dash=v=>v==null?'–':qty(v);
  $('t-strat').innerHTML=rows.length?T([['Stock',x=>`<b>${esc(x.sym)}</b>${x.live?'<span class="tag u">Live candle</span>':''}`],['Signal',x=>`<span class="tag ${x.side==='BUY'?'l':'s'}">${x.side}</span>`],['Setup',x=>esc(x.setup)],['TF',x=>x.tf==='m1'?'1m':'5m'],
+  ['Live rank',x=>`<span class="${x.side==='BUY'?'up':'dn'}">${x.side==='BUY'?'Long':'Short'} #${x.rank}</span>`],
   ['R Factor',x=>`<span class="${x.r>=1.5?'hotn':''}">${p2(x.r)}</span>`],['Sector %',x=>`<span class="${cls(x.schg)}">${pct(x.schg)}</span>`],
   ['Entry level',x=>(x.side==='BUY'?'▲ ':'▼ ')+p2(x.entry)],['Current price',x=>p2(x.ltp)],['From entry',x=>`<span class="${cls(x.side==='BUY'?x.ltp-x.entry:x.entry-x.ltp)}">${pct((x.ltp/x.entry-1)*100)}</span>`],
   ['Pullback / range H–L',x=>p2(x.h)+' – '+p2(x.l)],['Prior / avg vol',x=>dash(x.va)],['Pullback vol',x=>dash(x.vb)],['Breakout vol',x=>dash(x.vc)],['Signal time (IST)',x=>hhmm(x.t)]],rows,3)
-  :`<p class="mute" style="padding:8px">${sl.n?'No shortlisted stock fully meets the conditions in this window right now.':'No stock has R Factor above '+sl.min_r+' in the most-moving sectors yet.'}</p>`}
+  :`<p class="mute" style="padding:8px">${sl.n?'None of the '+sl.n+' top-ranked Live monitor stocks has a setup forming in this window right now.':'No stock is tagged Long watch or Short watch with R Factor ≥ '+sl.min_r+' in the Live monitor yet.'}</p>`}
 const VIEW={sectors,monitor,pulse,gaps,strategy};
 function draw(){const sc=[...document.querySelectorAll('.scroll')].map(e=>e.scrollTop);VIEW[tab]();document.querySelectorAll('.scroll').forEach((e,i)=>{if(sc[i])e.scrollTop=sc[i]})}
 let manual=false;

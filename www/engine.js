@@ -62,8 +62,8 @@ const CFG = {
   m5: { mins: 5, start: 555, end: 600, n: 4, maxPct: 0.60 },   // 5-minute candles, 09:15-10:00 IST; range = last 4 candles, <= 0.60% wide
   smallBody: 0.5,    // pullback candle body must be <= 50% of the prior trend candle's body
   rangeVolX: 1.5,    // range-breakout candle volume must be >= 1.5x the average volume of the range candles
-  minR: 1,           // shortlist: only stocks with R Factor ABOVE this value are scanned (raise to 1.5 or 2 for fewer stocks)
-  topSectors: 3      // shortlist: the 3 strongest up sectors (Buy signals only) and 3 strongest down sectors (Sell signals only)
+  highR: 1.5,        // 'high R Factor': a stock must have R Factor at or above this (same level the Live monitor flags)
+  topN: 10           // how many top-ranked Long-watch and Short-watch stocks (by R Factor) from the Live monitor are scanned
 };
 const minOf = t => ((t + IST) % 86400) / 60;                  // minute of day in IST
 function scan(sym, bars, key) {
@@ -109,10 +109,12 @@ async function run() {
     SYMS.forEach((s, k) => { try { const m = metrics(s, daily[s], intra[k]); if (m) { rows.push(m); lastTs = Math.max(lastTs, intra[k][intra[k].length - 1].t); } } catch (e) {} });
     if (!rows.length) throw ERR[0] || new Error("No data returned - check internet; Yahoo may be limiting requests");
     const failed = intra.filter(x => !x).length, sday = dayKey(lastTs), [sectors, stocks] = build(rows);
-    // Shortlist from the live screening: R Factor above minR, in the most-moving sectors. Up sectors -> Buy signals only, down sectors -> Sell signals only.
-    const upS = sectors.filter(s => s.chg > 0).slice(0, CFG.topSectors), dnS = [...sectors].reverse().filter(s => s.chg < 0).slice(0, CFG.topSectors);
-    const upSet = new Set(upS.map(s => s.name)), dnSet = new Set(dnS.map(s => s.name)), rOf = Object.fromEntries(rows.map(r => [r.sym, r])), sc = Object.fromEntries(sectors.map(s => [s.name, s.chg]));
-    const short = rows.filter(r => r.r > CFG.minR && (upSet.has(r.sector) || dnSet.has(r.sector))).map(r => r.sym);
+    // Strategy filter = Live monitor ranking: stocks tagged Long watch / Short watch, ranked by R Factor (top N each side), with high R Factor.
+    const rOf = Object.fromEntries(rows.map(r => [r.sym, r])), sc = Object.fromEntries(sectors.map(s => [s.name, s.chg])), rank = {};
+    let nLong = 0, nShort = 0;
+    for (const [tag, side] of [["Long watch", "BUY"], ["Short watch", "SELL"]])
+      rows.filter(r => r.signal === tag && r.r >= CFG.highR).sort((x, y) => y.r - x.r).slice(0, CFG.topN).forEach((r, i) => { rank[r.sym] = { side, n: i + 1 }; side === "BUY" ? nLong++ : nShort++; });
+    const short = Object.keys(rank);
     if (want1m) {                                             // 1-minute candles: only for shortlisted stocks, and only until their 09:15-09:30 window is complete
       if (!m1 || m1.day !== sday) m1 = { day: sday, bars: {} };
       const need = short.filter(s => !ok1(s, sday)), r1 = await pool(need, 8, s => chart(s, "1d", "1m"));
@@ -122,13 +124,13 @@ async function run() {
     for (const key of ["m5", "m1"]) {
       const by = key === "m5" ? Object.fromEntries(SYMS.map((s, k) => [s, intra[k]])) : (m1 && m1.day === sday ? m1.bars : null); let scanned = 0;
       if (by) for (const s of short) { const b = by[s]; if (b && b.length) { scanned++;
-        for (const g of scan(s, b, key)) if (g.side === "BUY" ? upSet.has(g.sector) : dnSet.has(g.sector)) strat[key].push({ ...g, r: rOf[s].r, schg: sc[g.sector] }); } }
+        for (const g of scan(s, b, key)) if (g.side === rank[s].side) strat[key].push({ ...g, r: rOf[s].r, schg: sc[g.sector], rank: rank[s].n }); } }
       strat[key].sort((x, y) => y.t - x.t);
       sinfo[key] = { ready: !!by, scanned, universe: SYMS.length, session, active: marketOpen() && nowMin >= CFG[key].start && nowMin < CFG[key].end };
     }
     const ages = intra.filter(b => b && b.length).map(b => Date.now() / 1000 - b[b.length - 1].t), md = intra.find(b => b && b.meta && b.meta.exchangeDataDelayedBy != null);
     const d = new Date(Date.now() + IST * 1000);
-    Object.assign(S, { stocks, sectors, strat, sinfo, sday, short, shortlist: { n: short.length, min_r: CFG.minR, up: upS.map(s => ({ name: s.name, chg: s.chg })), down: dnS.map(s => ({ name: s.name, chg: s.chg })) }, error: null, seq: S.seq + 1, ts: Date.now() / 1000, data_ts: lastTs,
+    Object.assign(S, { stocks, sectors, strat, sinfo, sday, short, shortlist: { n: short.length, min_r: CFG.highR, top_n: CFG.topN, long: nLong, short: nShort }, error: null, seq: S.seq + 1, ts: Date.now() / 1000, data_ts: lastTs,
       warn: failed ? failed + " of " + SYMS.length + " stocks could not be loaded" + (ERR[0] ? " (" + friendly(ERR[0]) + ")" : "") : null,
       feed: { provider: "Yahoo Finance (unofficial chart API)", mode: "polled every " + REFRESH + "s, no WebSocket", age_min: ages.length ? median(ages) / 60 : null,
               meta_delay: md ? md.meta.exchangeDataDelayedBy : null },
